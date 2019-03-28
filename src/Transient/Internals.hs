@@ -50,9 +50,6 @@ import           Data.String
 import qualified Data.ByteString.Char8 as BS
 import           Data.Typeable
 
-#ifndef ETA_VERSION
-import           Data.Atomics
-#endif
 
 #ifdef DEBUG
 
@@ -76,9 +73,7 @@ tshow _ y= y
 
 #endif
 
-#ifdef ETA_VERSION
 atomicModifyIORefCAS = atomicModifyIORef
-#endif
 
 type StateIO = StateT EventF IO
 

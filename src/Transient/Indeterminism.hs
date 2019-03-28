@@ -28,10 +28,6 @@ import GHC.Conc
 import Data.Time.Clock
 import Control.Exception 
 
-#ifndef ETA_VERSION
-import Data.Atomics
-#endif 
-
 
 -- | Converts a list of pure values into a transient task set. You can use the
 -- 'threads' primitive to control the parallelism.

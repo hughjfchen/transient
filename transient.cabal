@@ -41,7 +41,6 @@ library
             
     else
         build-depends:
-                     atomic-primops
 
     exposed-modules: Transient.Backtrack
                      Transient.Base
@@ -80,7 +79,6 @@ test-suite test-transient
                      , mtl
                      , stm
                      , random
-                     , atomic-primops
     type: exitcode-stdio-1.0
     main-is: TestSuite.hs
     build-depends:
