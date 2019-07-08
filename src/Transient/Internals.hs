@@ -3,8 +3,8 @@
 -- Module      :  Base
 -- Copyright   :
 -- License     :  MIT
---
--- Maintainer  :  agocorona@gmail.com
+-- 
+-- Maintainer  :  agocoona@gmail.com
 -- Stability   :
 -- Portability :
 --
@@ -962,9 +962,9 @@ async io = do
 -- serialization.
 sync :: TransIO a -> TransIO a
 sync x = do
-  setData WasRemote
-  r <- x
-  delData WasRemote
+  was <- getSData <|> return NoRemote
+  r <- x <** setData WasRemote
+  setData was
   return r
 
 -- | @spawn = freeThreads . waitEvents@
