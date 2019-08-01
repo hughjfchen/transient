@@ -8,7 +8,7 @@
 -- Stability   :
 -- Portability :
 --
--- | See http://github.com/agocorona/transient
+-- | See http://github.com/transient-haskell/transient 
 -- Everything in this module is exported in order to allow extensibility.
 -----------------------------------------------------------------------------
 {-# LANGUAGE CPP                       #-}
@@ -34,7 +34,7 @@ import           Control.Exception hiding (try,onException)
 import qualified Control.Exception  (try)
 import           Control.Concurrent
 -- import           GHC.Real
---import           GHC.Conc(unsafeIOToSTM)
+-- import           GHC.Conc(unsafeIOToSTM)
 -- import           Control.Concurrent.STM hiding (retry)
 -- import qualified Control.Concurrent.STM  as STM (retry)
 import           System.Mem.StableName
@@ -48,7 +48,9 @@ import           System.IO.Error
 
 import           Data.String
 import qualified Data.ByteString.Char8 as BS
+import qualified Data.ByteString.Lazy.Char8             as BSL
 import           Data.Typeable
+
 
 
 #ifdef DEBUG
@@ -73,7 +75,7 @@ tshow _ y= y
 
 #endif
 
-atomicModifyIORefCAS = atomicModifyIORef
+
 
 type StateIO = StateT EventF IO
 
@@ -353,7 +355,10 @@ readWithErr n line =
                      ++ "\" in:  " ++ " <" ++ show line ++ "> ")
   where (v, left):_ = readsPrec n line
 
-newtype ParseError= ParseError String deriving (Show)
+newtype ParseError= ParseError String
+
+instance Show ParseError where
+   show (ParseError s)= "ParseError " ++ s 
 
 instance Exception ParseError
 
@@ -468,7 +473,7 @@ instance AdditionalOperators TransIO where
       runTrans  mb
       return a
 
-infixr 1 <***, <**, **>
+infixl 4 <***, <**, **>
 
 -- | Run @b@ once, discarding its result when the first task in task set @a@
 -- has finished. Useful to start a singleton task after the first task has been
@@ -525,9 +530,9 @@ tailsafe (_:xs) = xs
 
 -- * Threads
 
-waitQSemB   sem = atomicModifyIORefCAS sem $ \n ->
+waitQSemB   sem = atomicModifyIORef sem $ \n ->
                     if n > 0 then(n - 1, True) else (n, False)
-signalQSemB sem = atomicModifyIORefCAS sem $ \n -> (n + 1, ())
+signalQSemB sem = atomicModifyIORef sem $ \n -> (n + 1, ())
 
 -- | Sets the maximum number of threads that can be created for the given task
 -- set.  When set to 0, new tasks start synchronously in the current thread.
@@ -542,7 +547,7 @@ threads n process = do
 
 -- | Terminate all the child threads in the given task set and continue
 -- execution in the current thread. Useful to reap the children when a task is
--- done.
+-- done, restart a task when a new event happens etc.
 --
 oneThread :: TransIO a -> TransIO a
 oneThread comp = do
@@ -553,7 +558,7 @@ oneThread comp = do
                , children = rchs
                , labelth  = label }
   liftIO $ do
-     atomicModifyIORefCAS (labelth st) $ \(_, label) -> ((Parent,label),())
+     atomicModifyIORef (labelth st) $ \(_, label) -> ((Parent,label),())
      hangThread st st'
 
   put st'
@@ -581,7 +586,17 @@ oneThread comp = do
 labelState :: (MonadIO m,MonadState EventF m) => BS.ByteString -> m ()
 labelState l =  do
   st <- get
-  liftIO $ atomicModifyIORefCAS (labelth st) $ \(status,_) -> ((status,  l), ())
+  liftIO $ atomicModifyIORef (labelth st) $ \(status,_) -> ((status,  l), ())
+
+-- | kill a thread subtree with this label
+killState thid= do
+      st <- findState match =<<  topState
+      liftIO $ killBranch' st
+      where
+      match st= do
+         (_,lab) <-liftIO $ readIORef $ labelth st
+         return $ if lab == thid then True else False
+    
 
 printBlock :: MVar ()
 printBlock = unsafePerformIO $ newMVar ()
@@ -867,7 +882,7 @@ setRState x= do
                             ref <- Ref <$> liftIO (newIORef x)
                             setData  ref
                             return  ref
-    liftIO $ atomicModifyIORefCAS ref $ const (x,())
+    liftIO $ atomicModifyIORef ref $ const (x,())
 
 getRData :: (MonadIO m, MonadState EventF m, Typeable a) => m (Maybe a)
 getRData= do
@@ -899,7 +914,7 @@ sandbox mx = do
 
 -- | generates an identifier that is unique within the current program execution
 genGlobalId  :: MonadIO m => m Int
-genGlobalId= liftIO $ atomicModifyIORefCAS rglobalId $ \n -> (n +1,n)
+genGlobalId= liftIO $ atomicModifyIORef rglobalId $ \n -> (n +1,n)
 
 rglobalId= unsafePerformIO $ newIORef (0 :: Int)
 
@@ -959,7 +974,7 @@ async io = do
 -- | Force an async computation to run synchronously. It can be useful in an
 -- 'Alternative' composition to run the alternative only after finishing a
 -- computation.  Note that in Applicatives it might result in an undesired
--- serialization.
+-- squencing.
 sync :: TransIO a -> TransIO a
 sync x = do
   was <- getSData <|> return NoRemote
@@ -967,7 +982,7 @@ sync x = do
   setData was
   return r
 
--- | @spawn = freeThreads . waitEvents@
+-- | create task threads faster, but with no control: @spawn = freeThreads . waitEvents@
 spawn :: IO a -> TransIO a
 spawn = freeThreads . waitEvents
 
@@ -1010,7 +1025,7 @@ parallel ioaction = Transient $ do
       put cont { event = Nothing }
       return $ unsafeCoerce j
     Nothing    -> do
-      liftIO $ atomicModifyIORefCAS (labelth cont) $ \(_, lab) -> ((Parent, lab), ())
+      liftIO $ atomicModifyIORef (labelth cont) $ \(_, lab) -> ((Parent, lab), ())
 
       liftIO $ loop cont ioaction
 
@@ -1022,7 +1037,7 @@ parallel ioaction = Transient $ do
 loop ::  EventF -> IO (StreamData t) -> IO ()
 loop parentc rec = forkMaybe parentc $ \cont -> do
   -- Execute the IO computation and then the closure-continuation
-  liftIO $ atomicModifyIORefCAS (labelth cont) $ const ((Listener,BS.pack "wait"),())
+  liftIO $ atomicModifyIORef (labelth cont) $ const ((Listener,BS.pack "wait"),())
   let loop'=   do
          mdat <- rec `catch` \(e :: SomeException) -> return $ SError e
          case mdat of
@@ -1035,7 +1050,7 @@ loop parentc rec = forkMaybe parentc $ \cont -> do
                   loop'
 
          where
-         setworker cont= liftIO $ atomicModifyIORefCAS (labelth cont) $ const ((Alive,BS.pack "work"),())
+         setworker cont= liftIO $ atomicModifyIORef (labelth cont) $ const ((Alive,BS.pack "work"),())
 
          iocont  dat cont = do
 
@@ -1054,7 +1069,8 @@ loop parentc rec = forkMaybe parentc $ \cont -> do
        Just sem  -> do
              dofork <- waitQSemB sem
              if dofork then  forkIt parent proc else proc parent
-
+             -- else signalQSemB sem  >> forkMaybe parent proc -- to allow yield
+              
 
   forkIt parent  proc= do
      chs <- liftIO $ newMVar []
@@ -1083,7 +1099,7 @@ loop parentc rec = forkMaybe parentc $ \cont -> do
              when(not $ freeTh parent  )  $ do -- if was not a free thread
 
                  th <- myThreadId
-                 (can,label) <- atomicModifyIORefCAS (labelth cont) $ \(l@(status,label)) ->
+                 (can,label) <- atomicModifyIORef (labelth cont) $ \(l@(status,label)) ->
                     ((if status== Alive then Dead else status, label),l)
                  when (can /= Parent ) $ free th parent
 
@@ -1154,22 +1170,25 @@ killChildren childs  = do
 
 
 
--- | Make a transient task generator from an asynchronous callback handler.
+-- | capture a callback handler so that the execution of the current computation continues 
+-- whenever an event occurs. The effect is called "de-inversion of control"
 --
 -- The first parameter is a callback. The second parameter is a value to be
 -- returned to the callback; if the callback expects no return value it
--- can just be a @return ()@. The callback expects a setter function taking the
+-- can just be @return ()@. The callback expects a setter function taking the
 -- @eventdata@ as an argument and returning a value to the callback; this
 -- function is supplied by 'react'.
 --
 -- Callbacks from foreign code can be wrapped into such a handler and hooked
 -- into the transient monad using 'react'. Every time the callback is called it
--- generates a new task for the transient monad.
+-- continues the execution on the current transient computation.
 --
+-- >     
+-- >   event <- react  onEvent $ return ()
+-- >
 
 react
-  :: Typeable eventdata
-  => ((eventdata ->  IO response) -> IO ())
+  :: ((eventdata ->  IO response) -> IO ())
   -> IO  response
   -> TransIO eventdata
 react setHandler iob= Transient $ do
@@ -1187,7 +1206,7 @@ react setHandler iob= Transient $ do
           j@(Just _) -> do
             put cont{event=Nothing}
             return $ unsafeCoerce j
-
+      
 -- | Runs the rest of the computation in a new thread. Returns 'empty' to the current thread
 abduce = async $ return ()
 
@@ -1235,7 +1254,7 @@ inputf flag ident  mv cond= do
                Just x -> if cond x 
                              then liftIO $ do
                                    writeIORef rconsumed True  
-                                   -- print x
+                                   print x
                                    -- hFlush stdout
                                    return x
                              else do liftIO $  when (isJust mv) $ putStrLn "";  returnm mv
@@ -1248,9 +1267,11 @@ inputf flag ident  mv cond= do
     -- read1 :: String -> Maybe a
     read1 s= r 
       where
-      r = if (typeOf $ fromJust r) == typeOf ""
-            then Just $ unsafeCoerce s
-            else case reads s of
+      typ= typeOf $ fromJust r
+      r = if typ == typeOf ""                 then Just $ unsafeCoerce s
+          else if typ == typeOf (BS.pack "")  then Just $ unsafeCoerce $ BS.pack  s
+          else if typ == typeOf (BSL.pack "") then Just $ unsafeCoerce $ BSL.pack  s
+          else case reads s of
               [] ->  Nothing
               [(x,"")] -> Just x
 
@@ -1356,7 +1377,7 @@ processLine r = do
         in breakSlash (res++[r]) $ tail1 rest
 
     breakSlash res s=
-        let (r,rest) = span(\x -> x /= '/' && x /= ' ') s
+        let (r,rest) = span(\x -> (not $ elem x "/,:") && x /= ' ') s
         in breakSlash (res++[r]) $ tail1 rest
 
     tail1 []= []
@@ -1415,7 +1436,8 @@ keep mx = do
    forkIO $ do
 --       liftIO $ putMVar rexit  $ Right Nothing
        runTransient $ do
-           onException $ \(e :: SomeException ) -> liftIO $ putStr  "keep block: " >> print e
+           onException $ \(e :: SomeException ) -> liftIO $ putStr  "keep: " >> print e 
+           
            onException $ \(e :: IOException) -> do
              when (ioeGetErrorString e ==  "resource busy") $ do
                  liftIO $ do print e ; putStrLn "EXITING!!!";  putMVar rexit Nothing
@@ -1466,19 +1488,21 @@ keep mx = do
 -- returns either the value returned by `exit`.  or Nothing, when there are no
 -- more threads running
 --
+
 keep' :: Typeable a => TransIO a -> IO  (Maybe a)
 keep' mx  = do
    liftIO $ hSetBuffering stdout LineBuffering
-   rexit <- newEmptyMVar
+   rexit <- newEmptyMVar 
    forkIO $ do
            runTransient $ do
-              onException $ \(e :: SomeException ) -> liftIO $ putStr  "keep block: " >> print e
-    
+              onException $ \(e :: SomeException ) -> liftIO $ putStr  "keep': " >> print e
+              
               onException $ \(e :: IOException) -> do
                  when (ioeGetErrorString e ==  "resource busy") $ do
                      liftIO $ do  print e ; putStrLn "EXITING!!!"; putMVar rexit Nothing
                      liftIO $ putMVar rexit Nothing
                      empty
+                     
               setData $ Exit rexit
               mx
 
@@ -1508,6 +1532,7 @@ exit x= do
   where
   type1 :: a -> TransIO (Exit (MVar (Maybe a)))
   type1= undefined
+
 
 
 
@@ -1638,14 +1663,14 @@ back reason =  do
   goBackt (Backtrack _ [] )= empty
   goBackt (Backtrack b (stack@(first : bs)) )= do
         setData $ Backtrack (Just reason) stack
-        x <-  runClosure first                                    --  !> ("RUNCLOSURE",length stack)
+        x <-  runClosure first                                      !> ("RUNCLOSURE",length stack)
         Backtrack back bs' <- getData `onNothing`  return (backStateOf  reason)
 
         case back of
-                 Nothing    -> runContinuation first x            -- !> "FORWARD EXEC"
+                 Nothing    -> runContinuation first x             !> "FORWARD EXEC"
                  justreason -> do
                         setData $ Backtrack justreason bs
-                        goBackt $ Backtrack justreason bs     -- !> ("BACK AGAIN",back)
+                        goBackt $ Backtrack justreason bs      !> ("BACK AGAIN",back)
                         empty
 
 backStateOf :: (Show a, Typeable a) => a -> Backtrack a
@@ -1735,7 +1760,7 @@ onException exc= return () `onException'` exc
 -- When an exception backtracking reach the backPoint it executes all the handlers registered for it.
 --
 -- Use case: suppose that when a connection fails, you need to stop a process.
--- This process may not be directly involved in the connection. Perhaps it was initiated after the socket is being read
+-- This process may not be started before the connection. Perhaps it was initiated after the socket read
 -- so an exception will not backtrack trough the process, since it is downstream, not upstream. The process may
 -- be even unrelated to the connection, in other branch of the computation.
 --
@@ -1752,7 +1777,7 @@ exceptionPoint = do
 
 
 
--- in conjunction with `backPoint` it set a handler that will be called when backtracking pass trough the point
+-- | in conjunction with `backPoint` it set a handler that will be called when backtracking pass trough the point
 onExceptionPoint :: Exception e => BackPoint e -> (e -> TransIO()) -> TransIO ()
 onExceptionPoint= onBackPoint
 
@@ -1820,10 +1845,12 @@ catcht mx exc= do
     sandbox  $ do
          r <- onException' mx (\e -> do
                  passed <- liftIO $ readIORef rpassed
+                 return () !> ("CATCHT passed", passed)
                  if not passed then continue >> exc e else do
                     Backtrack r stack <- getData  `onNothing`  return (backStateOf  e)      
                     setData $ Backtrack r $ tail stack
-                    back e
+                    back e 
+                    return () !> "AFTER BACK"
                     empty )
                     
          liftIO $ writeIORef rpassed True
